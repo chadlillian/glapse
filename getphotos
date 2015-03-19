@@ -1,0 +1,185 @@
+#!/usr/bin/python
+
+#   this makes a time lapse like movie of the route along the coordinates in a file that you pass in
+#   pass in a file with coordinates on each line
+#       ex. ./getphotos enthought.txt
+#   the output is a directory full of images, and an executable to stitch the photos together into a movie
+#   when this program is done, then run the executable 'makemovie_[filename]' where filename is the name of the file passed into this program
+#
+#   I have included my own api key for google so that you can run this
+
+import  urllib, json
+import  urllib2
+import  pprint
+import  polyline    #   polyline comes from: https://gist.github.com/signed0/2031157
+import  sys
+import  os
+from    math import *
+
+class   googleStreetView:
+    def __init__(self,apikey):
+        self.apikey =apikey
+
+#   given two sets of coordinates, submit to google maps and get a json with a fine grain list of coordinates defining the route
+#       args:
+#           points, a tuple of tuples:
+#               ((40.314, -111.65491666666667), (40.4315, -111.61435))
+#       return:
+#           self.path: a list of tuples - coordinates defining a path between the argument points
+    def getPath(self,points):
+        urlbase     ="http://maps.googleapis.com/maps/api/directions/json?" 
+        
+        strpoints   =['%f,%f'%point for point in points]                                    #   convert float points to string points
+        
+        urlpoints   ='origin='+strpoints[0]+'&destination='+strpoints[-1]
+        url         =urlbase+urlpoints+'&sensor=false'                                      #   builds the url needed to request a route from Google
+    
+        googleResponse  =urllib.urlopen(url)
+        jsonResponse    =json.loads(googleResponse.read())['routes']                        #   extracts the route from the google response
+        self.path       =polyline.decode(jsonResponse[0]['overview_polyline']['points'])    #   decode the json into a list of tuples
+    
+#   given a list of coordinates interpolate new coordinates along that path at a specified interval (to get a finer set of points than google returns)
+#       args:
+#           ipath:  list of coordinate tuples
+#           ddist:  distance between new interpolated locations
+    def interp(self,ipath,ddist):
+        self.locations  =[]
+        for i in range(len(ipath)-1):
+            dist    =self.bearing(ipath[i],ipath[i+1])['dist']  #   get distance between locations i,i+1
+            N       =int(dist/ddist)                            #   calc number of interpolations to do
+            dd      =[float(j)/N for j in range(N)]             #   list of evenly spaced floats [0,1)
+            interps =[((1-t)*ipath[i][0]+t*ipath[i+1][0],(1-t)*ipath[i][1]+t*ipath[i+1][1]) for t in dd]    #   interpolate the locations of new coords
+            self.locations.extend(interps)                      #   add new list of coords to locations
+        self.locations.append(ipath[-1])                        #   tack on last location
+    
+#   given two coordinates, return the distance between them and the direction from the first to the second (using the Haversine formula)
+#       args:
+#           c1: coordinate 1
+#           c2: coordinate 2
+#       return:
+#           dict with distance and bearing
+    def bearing(self,c1,c2):
+        lat1    =radians(c1[0])
+        lon1    =radians(c1[1])
+        lat2    =radians(c2[0])
+        lon2    =radians(c2[1])
+    
+        dlat    =lat2-lat1
+        dlon    =lon2-lon1
+
+        a       =(sin(dlat/2)**2)+(sin(dlon/2)**2)*cos(lat1)*cos(lat2)  #   haversine formula (corrects for oblong earth):
+        c       =2*atan2(sqrt(a),sqrt(1-a))
+        dist    =20908800*c                                             #   convert to feet
+
+        #       calculate heading
+        head    =90-degrees(atan2(cos(lat1)*sin(lat2)-sin(lat1)*cos(lat2)*cos(lon2-lon1), sin(lon2-lon1)*cos(lat2)))
+    
+        return  {'dist':dist, 'bearing':head}
+    
+#   given a path download photos from google streetview
+#       args:
+#           path:       a list of tuples, each of which is a set of coordinates
+#           dirname:    directory to store the photos in
+#           prefix:     the prefix for this set of photos
+#       return:
+#           photos saved to subdirectory
+    def getimages(self,path,dirname,prefix):
+        N           =len(path)
+        #   when the bearing between two adjacent points is used the video gets shakey
+        #       this is relieved by using the bearing between locations a few steps (lagged) apart (hard coded at 5)
+        lag         =5      
+        totaldist   =0
+        for i in range(0,N-1):
+            lat1    =path[i][0]
+            lon1    =path[i][1]
+            lag2    =min(i+lag,N-1)                         #   ensure that the lag doesn't go past the end of the list
+            dh      =self.bearing(path[i],path[lag2])
+            b1      =dh['bearing']                          #   use the 'lagged' bearing
+            dh      =self.bearing(path[i],path[i+1])
+            d1      =dh['dist']                             #   use the distance between adjacent points
+            totaldist   =totaldist+d1
+        
+            sys.stdout.flush()
+        
+            #   build up the url to request an image
+            #       pass in the location (lat1,lon1), the heading (b1), and the apikey
+            svurlbase   ='http://maps.googleapis.com/maps/api/streetview?size=640x640&location='\
+                            +str(lat1)+','+str(lon1)+'&fov=120&heading='+str(b1)\
+                            +'&pitch=10&sensor=false&key='+self.apikey
+            
+            imagename   =dirname+'/image_%i_%06i.jpeg'%(prefix,i)
+
+            #   retrieve images, exception if streetview does not cover part of that route
+            try:
+                urllib.urlretrieve(svurlbase,imagename)
+            except:
+                print urllib2.urlopen(svurlbase)
+            size    =os.stat(imagename).st_size
+
+            #   display i/N, latitude, longitude, bearing, incremental distance, total distance (miles), size of downloaded photo
+            print '%7i / %7i %12.5f %12.5f %12.5i %12.5f %12.5f %i'%(i,N,lat1,lon1,b1,d1,totaldist/5280.0,size)
+    
+#   convert coordinates to decimal format
+    def degMinToDec(self,degmin):
+        dm  =degmin.split('\xc2\xb0')   #   unicode degree symbol
+        d   =int(dm[0])
+        m   =cmp(d,0)*float(dm[1].split("'")[0])/60.0   #   cmp(d,0) to give the correct sign for the minutes (if degrees are negative then the minutes are as well)
+        dec =d+m
+        return  dec
+    
+#   Read in a file with coordinates defining a route, and return a list of stages for that route
+#       args:   
+#           filename    =text file with coordinates on each line (no more than 10 lines due to google restrictions)
+#               Example lines: (note that % represents the unicode degree symbol, which python does not like to have in a script)
+#               40% 18.840', -111% 39.295'
+#               40% 25.890', -111% 36.861'
+#       return:
+#           list of nested tuples:
+#               ((40.314, -111.65491666666667), (40.4315, -111.61435))
+#           first list element is coordinates [0,1] of the file,
+#           second list element is coordinates [1,2] of the file, ...
+    def readcoordsfile(self,filename):
+        lines   =open(filename).readlines()
+        coords  =[]
+        for line in lines:
+            if line[0]!='#':        #   skip commented lines
+                qline   =line.split(',')
+                #coords.append((self.degMinToDec(qline[0]),self.degMinToDec(qline[1]))) 
+                coords.append((float(qline[0]),float(qline[1])))
+    
+        self.stages =[(c1,c2) for c1,c2 in zip(coords[:-1],coords[1:])]
+
+#   driver routine:
+#       args:
+#           filename:   name of file with coordinates in it
+#           interval:   distance between successive images to download
+#                       20 feet is about the minimum dist, in google street view 
+#                       if you go lower than this then successive movie frames will come from the same location (streetview images are about 20ft apart)
+#       return:
+#           a directory with the name of the input file, loaded with photos 
+#           the photos are named image_[i]_[j].jpeg, where i is the stage number and j is the image number from stage i
+
+    def getImages(self,filename,interval):
+        self.readcoordsfile(filename)
+        newdir  =os.path.splitext(filename)[0]
+    
+        if not os.path.isdir(newdir):
+            os.makedirs(newdir)
+        
+        for a,stage in enumerate(self.stages):
+            self.getPath(stage)
+            self.interp(self.path,interval)
+            self.getimages(self.locations,newdir,a)
+        
+        #   make the movie script to run, this stitches all of the photos together into a movie
+        movieScriptFileName ='makemovie_'+newdir
+        moviescript =open(movieScriptFileName,'w')
+        print>>moviescript,'# run this script to stitch the photos together into a movie'
+        print>>moviescript,'mencoder mf://%s/image_*_*.jpeg -mf w=640:h=640:fps=12:type=jpeg -ovc copy -oac copy -o %s.avi'%(newdir,newdir)
+        moviescript.close()
+        os.chmod(movieScriptFileName,0775)
+
+apikey  ='AIzaSyBTToTFxhPFWnQHrMEk0gAWd90WQtdK3pE'
+
+gsv =googleStreetView(apikey)
+gsv.getImages(sys.argv[1],20)

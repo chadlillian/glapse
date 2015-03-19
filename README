@@ -1,0 +1,13 @@
+Written by Chad Lillian
+
+This is a program I wrote to build a time-lapse style movie using images from google street view
+
+first run getphotos:
+	./getphotos enthought.txt
+
+then run makemovie_enthought (this is written by getphotos)
+	./makemovie_enthought
+
+getphotos was written by me
+polyline.py was taken from git
+
